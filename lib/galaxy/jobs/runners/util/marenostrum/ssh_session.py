@@ -89,11 +89,14 @@ class SSHSession():
 #                return sftp.rmdir(input_file_path)
             elif oper == 'lstat':
                 return sftp.lstat(input_file_path)
+            elif oper == 'stat':
+                return sftp.stat(input_file_path)
             else:
                 print('Unknown sftp command', oper)
                 return True
         #TODO check appropriate errors
         except IOError as err:
-            sys.exit(err)
+            return False
+            #sys.exit(err)
         return False
 

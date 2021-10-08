@@ -684,7 +684,7 @@ class Task():
         return False
 
     def get_status(self, job_id):
-        stdout, stderr = self.ssh_session.run_command("sacct -j " + job_id + " -o state")
-        state = stdout.split()[-1]
+        stdout, stderr = self.ssh_session.run_command("sacct -j " + job_id + " | grep main | awk '{print $6}'")
+        state = stdout
         return state
 
