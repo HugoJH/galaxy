@@ -6,12 +6,16 @@ import json
 import logging
 import sys
 import os
+import pathlib
+import subprocess
+from shlex import quote
 import re
 import string
 import conda_pack
 import paramiko
 import tempfile
 import shutil
+from os.path import splitext
 from hashlib import md5
 from galaxy import model
 from galaxy.jobs import JobDestination
@@ -103,11 +107,10 @@ class MarenostrumJobRunner(AsynchronousJobRunner):
             return
 
         self.task.set_remote_base_path(self._get_remote_working_dir(job_wrapper))
+        wrapper_script = self._get_wrapper_script(job_wrapper)
+        prepared_wrapper_script = "cd working; export GALAXY_SLOTS=46; /bin/bash " + self._prepare_script(job_wrapper,wrapper_script)
 
-        wrapper_script = self.get_job_file(job_wrapper, exit_code_path=ajs.exit_code_file, shell=job_wrapper.shell)
-        wrapper_script = re.split("cd working; /bin/bash", wrapper_script)[1].split('\n')[0]
-        prepared_wrapper_script = self._prepare_script(job_wrapper,wrapper_script)
-        print(prepared_wrapper_script)
+        #print(prepared_wrapper_script)
 
         with open(ajs.job_file, "w") as f:
             f.write(prepared_wrapper_script) 
@@ -147,14 +150,14 @@ class MarenostrumJobRunner(AsynchronousJobRunner):
         elif "COMPLETED" in job_status:
             job_state.running = False
             state = model.Job.states.OK
+            if self.embed_metadata_in_job:
+                self._handle_metadata_externally(job_state.job_wrapper)
+            self._get_outputs(job_state.job_wrapper)
             self.create_log_files(job_state.output_file,
                                   job_state.exit_code_file,
                                   job_state.error_file,
                                   job_state.job_wrapper)
-            self._get_outputs(job_state.job_wrapper)
             job_state.job_wrapper.change_state(state)
-            if self.embed_metadata_in_job:
-                self._handle_metadata_externally(job_state.job_wrapper)
              
             self.mark_as_finished(job_state)
         elif "FAILED" in job_status:
@@ -243,6 +246,7 @@ class MarenostrumJobRunner(AsynchronousJobRunner):
         #Send galaxy's working dir to Marenostrum designated folder
         self.task.set_local_data_bundle(local_data_path=job_wrapper.working_directory)
         self.task.send_input_data(self._get_remote_working_dir(job_wrapper))
+
         self.task.load_host_config(host_config_path=os.path.join(self.config.config_dir,"BSC_MN4.json"))
 
     def _recover_task(self,host, userid, job_id):
@@ -327,12 +331,16 @@ class MarenostrumJobRunner(AsynchronousJobRunner):
 
 
     def create_log_files(self, output_file, exit_code_file, error_file, job_wrapper):
-        self.task.get_output_data(job_wrapper.working_directory)
-        output_files = self.task.task_data['output_data_bundle'].files
-        remote_output = job_wrapper.working_directory + '/' + [out for out in output_files if ".o" in out][0]
-        remote_error =  job_wrapper.working_directory + '/' + [err for err in output_files if ".e" in err][0]
-        os.rename(remote_error, error_file)
-        os.rename(remote_output, output_file)
+        remote_base_path = self._get_remote_working_dir(job_wrapper) + "/outputs"
+        remote_output = remote_base_path + "/tool_stdout" 
+        remote_error = remote_base_path + "/tool_stderr" 
+        remote_exit_code = self._get_remote_working_dir(job_wrapper) + '/' + os.path.basename(exit_code_file)
+        print("--------------REMOTE EXIT CODE---------------")
+        print(remote_exit_code)
+        print("--------------REMOTE EXIT CODE---------------")
+        self.task.ssh_session.run_sftp('get', remote_output, output_file) 
+        self.task.ssh_session.run_sftp('get', remote_error, error_file) 
+        self.task.ssh_session.run_sftp('get', remote_exit_code, exit_code_file) 
 
     def _get_path_from_script(self, job_wrapper, pattern):
         paths = [x for x in re.split("'| |\n", self._get_raw_script(job_wrapper)) if pattern in x]
@@ -356,12 +364,13 @@ class MarenostrumJobRunner(AsynchronousJobRunner):
 
     def _send_tool_script_to_MN4(self, job_wrapper):
         prepared_script = self._prepare_script(job_wrapper, self._get_raw_script(job_wrapper))
-        prepared_script = "cd working; bash " + prepared_script
-        with open(job_wrapper.working_directory + "/tool_script.sh", "w") as f:
+        prepared_script = "source " + self.conda_MN4 + "/etc/profile.d/conda.sh\n" + prepared_script
+        with open(job_wrapper.working_directory + "/tool_script.sh.prepared", "w") as f:
             f.write(prepared_script) 
-        self.task.set_local_file(local_data_filepath=job_wrapper.working_directory + "/tool_script.sh")
+        self.task.set_local_file(local_data_filepath=job_wrapper.working_directory + "/tool_script.sh.prepared")
         self.task.send_input_data(self._get_remote_working_dir(job_wrapper))
-
+        remote_file = self._get_remote_working_dir(job_wrapper) + "/tool_script.sh.prepared"
+        self.task.ssh_session.run_command("mv " + remote_file + " " + splitext(remote_file)[0]) 
 
     def _send_inputs_to_MN4(self, job_wrapper):
         for path in job_wrapper.get_input_paths():
@@ -374,7 +383,6 @@ class MarenostrumJobRunner(AsynchronousJobRunner):
     def _send_metadata_files_to_MN4(self, job_wrapper):
         metadata_paths = [x for x in re.split("'| |\n", self._get_raw_script(job_wrapper)) if "_metadata_files" in x]
         for path in metadata_paths:
-            print(path)
             remote_path = re.sub(self.config.get('file_path') + "/_metadata_files", self.metadata_files_path, path)
             self.task.set_local_file(local_data_filepath=path)
             self.task.send_input_data(os.path.dirname(remote_path))
@@ -392,6 +400,15 @@ class MarenostrumJobRunner(AsynchronousJobRunner):
             except IndexError:
                 print("Builtin tool in script")
         self._send_conda_envs(script)
+    def _get_wrapper_script(self, job_wrapper):
+        ajs = AsynchronousJobState(files_dir=job_wrapper.working_directory,
+                                   job_wrapper=job_wrapper,
+                                   job_destination=job_wrapper.job_destination)
+        wrapper_script = self.get_job_file(job_wrapper, exit_code_path=ajs.exit_code_file, shell=job_wrapper.shell)
+        wrapper_script = "".join(re.split("cd working; /bin/bash ", wrapper_script)[1:]).split("\n")
+
+        wrapper_script = "\n".join([x for x in wrapper_script if "; python \"metadata/set.py\";" not in x and  "galaxy_setup_environment" not in x])
+        return wrapper_script
 
     def _get_raw_script(self, job_wrapper):
         with open(os.path.join(job_wrapper.working_directory, "tool_script.sh"), "r") as f:
@@ -403,24 +420,24 @@ class MarenostrumJobRunner(AsynchronousJobRunner):
         return self.jobs_MN4 + "/" + id_path
 
     def _get_outputs(self, job_wrapper):
-        script = self._get_raw_script(job_wrapper)
-        outputs = [x for x in re.split("'| |\n", script) if "/files/" in x]
+        wrapper_script = self._get_wrapper_script(job_wrapper)
+        tool_script = self._get_raw_script(job_wrapper)
+        outputs  = [x for x in re.split("'| |\n", wrapper_script) if "/files/" in x]
+        outputs += [x for x in re.split("'| |\n", tool_script) if "/files/" in x]
         print("--------------------OUTPUTS-----------------")
         print(outputs)
         print("--------------------OUTPUTS-----------------")
         for output_path in outputs:
             remote_path = re.sub(self.config.get('file_path'), self.file_path_MN4, output_path)
+            remote_path = remote_path.strip('"')
+            
             print(f"getting output {remote_path} => {output_path}")
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
-            self.task.ssh_session.run_sftp('get', remote_path, output_path)
-        if self._remote_file_exists(self._get_remote_working_dir(job_wrapper) + "/outfile"): 
-            self.task.ssh_session.run_sftp('get', self._get_remote_working_dir(job_wrapper) + "/outfile",  job_wrapper.working_directory + "/working/outfile")
-            os.rename(job_wrapper.working_directory + "/working/outfile", job_wrapper.compute_outputs()[0].real_path)
-    
+            pathlib.Path(os.path.dirname(output_path)).mkdir(parents=True, exist_ok=True)
+            print(self.task.ssh_session.run_sftp('get', remote_path, output_path.strip('"')))
+        
     def _remote_file_exists(self, remote_path):
         try:
-            print(self.task.ssh_session.run_sftp('stat', remote_path))
-            return (self.task.ssh_session.run_sftp('stat', remote_path) != False)
+            return (not self.task.ssh_session.run_command("ls " + remote_path)[0] != True)
         except IOError:
             print(remote_path, " not found")
 
@@ -441,7 +458,6 @@ class MarenostrumJobRunner(AsynchronousJobRunner):
         #script = "cd " + self._get_remote_working_dir(job_wrapper) + "\n"
         #script = script + "export GALAXY_SLOTS=40\n" + raw_script
         script = re.sub(self.config.get('tool_dependency_dir') + "/_conda/envs", self.conda_MN4, raw_script)
-        script = "source " + self.conda_MN4 + "/etc/profile.d/conda.sh\n" + script
         # REPLACE LOCAL GALAXY CONDA PATH WITH MN4 CONDA PATH
         script = re.sub(self.config.get('tool_dependency_dir') + "/_conda", self.conda_MN4, script)
         # REPLACE GALAXY TOOLS PATH WITH MN4 TOOLS PATH

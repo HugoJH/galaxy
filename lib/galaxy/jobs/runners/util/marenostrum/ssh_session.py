@@ -70,16 +70,19 @@ class SSHSession():
         try:
             if oper == 'get':
                 sftp.get(input_file_path, output_file_path)
+                return True
             elif oper == 'put':
                 if os.path.isdir(input_file_path):
                     sftp.mkdir(output_file_path)
                 else:
                     sftp.put(input_file_path, output_file_path)
+                return True
             elif oper == 'create':
                 with sftp.file(output_file_path, "w") as remote_fileh:
                     remote_fileh.write(input_file_path)
 #            elif oper == 'open':
 #                return sftp.open(input_file_path)
+                return True
             elif oper == 'file':
                 with sftp.file(input_file_path, "r") as remote_file:
                     return remote_file.read().decode()
@@ -93,9 +96,10 @@ class SSHSession():
                 return sftp.stat(input_file_path)
             else:
                 print('Unknown sftp command', oper)
-                return True
+                return False
         #TODO check appropriate errors
         except IOError as err:
+            print(err)
             return False
             #sys.exit(err)
         return False

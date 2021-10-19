@@ -354,13 +354,14 @@ class BaseJobRunner:
                                                                            # We don't want to overwrite metadata that was copied over in init_meta(), as per established behavior
                                                                            kwds={'overwrite': False})
             external_metadata_script = f"{lib_adjust} {venv} {external_metadata_script}"
+            print(external_metadata_script)
             if resolve_requirements:
                 dependency_shell_commands = self.app.datatypes_registry.set_external_metadata_tool.build_dependency_shell_commands(job_directory=job_wrapper.working_directory)
                 if dependency_shell_commands:
                     if isinstance(dependency_shell_commands, list):
                         dependency_shell_commands = "&&".join(dependency_shell_commands)
                     external_metadata_script = f"{dependency_shell_commands}&&{external_metadata_script}"
-            log.debug('executing external set_meta script for job %d: %s' % (job_wrapper.job_id, external_metadata_script))
+            log.info('executing external set_meta script for job %d: %s' % (job_wrapper.job_id, external_metadata_script))
             external_metadata_proc = subprocess.Popen(args=external_metadata_script,
                                                       shell=True,
                                                       cwd=job_wrapper.working_directory,
@@ -368,7 +369,9 @@ class BaseJobRunner:
                                                       preexec_fn=os.setpgrp)
             job_wrapper.external_output_metadata.set_job_runner_external_pid(external_metadata_proc.pid, self.sa_session)
             external_metadata_proc.wait()
-            log.debug('execution of external set_meta for job %d finished' % job_wrapper.job_id)
+            print(external_metadata_proc.stdout)
+            print(external_metadata_proc.stderr)
+            log.info('execution of external set_meta for job %d finished' % job_wrapper.job_id)
 
     def get_job_file(self, job_wrapper, **kwds):
         job_metrics = job_wrapper.app.job_metrics

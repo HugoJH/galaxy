@@ -313,7 +313,7 @@ class Task():
         if add_files:
             self.task_data['local_data_bundle'].add_dir(local_data_path)
         self.modified = True
-        print("LOCAL_DATA_SET")
+
     def set_remote_base_path(self, remote_base_path):
         self.task_data['remote_base_path'] = remote_base_path
 
@@ -325,7 +325,6 @@ class Task():
         """
 
         self._open_ssh_session()
-        print("SSH SESSION OPENED")
         self.set_remote_base_path(remote_base_path)
         stdout, stderr = self.ssh_session.run_command('mkdir -p ' + self._remote_wdir())
         if stderr:
@@ -461,7 +460,7 @@ class Task():
         # Checking that configuration is a valid one
         if self.ssh_data.host not in self.host_config['login_hosts']:
             sys.exit("Error. Configuration available does not apply to", self.ssh_data.host)
-        print("TASK: opening ssh session")
+#        print("TASK: opening ssh session")
         self._open_ssh_session()
 
         self.task_data['local_run_script'] = local_run_script
@@ -621,10 +620,10 @@ class Task():
                 print("Warning: using input folder")
             else:
                 sys.exit("ERROR: Local path for output not provided")
-        print("--------------------DEBUG_GET_OUTPUT-------")
-        print(local_data_path)
-        print(self.task_data['remote_base_path'])
-        print("--------------------DEBUG_GET_OUTPUT-------")
+     #   print("--------------------DEBUG_GET_OUTPUT-------")
+     #   print(local_data_path)
+     #   print(self.task_data['remote_base_path'])
+     #   print("--------------------DEBUG_GET_OUTPUT-------")
         if not os.path.exists(local_data_path):
             os.mkdir(local_data_path)
 
