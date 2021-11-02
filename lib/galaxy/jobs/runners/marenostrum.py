@@ -96,14 +96,9 @@ class MarenostrumJobRunner(AsynchronousJobRunner):
         print("-------SENDING DATATYPE SCRIPTS TO MN4----")
         self._send_datatypes_scripts_to_MN4(job_wrapper)
         print("-------CREATING REMOTE FOLDERS------------")
-        self._compute_remote_output_paths_dirs(script)
+        self._compute_remote_output_paths_dirs(job_wrapper, script)
 
-        #self.task.ssh_session.run_command("mkdir -p " + self.metadata_files_path)
-        # job was deleted while we were preparing it
-        if job_wrapper.get_state() in (model.Job.states.DELETED, model.Job.states.STOPPED):
-            log.debug("(%s) Job deleted/stopped by user before it entered the queue", job_wrapper.get_id_tag())
-            if job_wrapper.cleanup_job in ("always", "onsuccess"):
-                job_wrapper.cleanup()
+        if self._cleanup_job_deleted_before_running(job_wrapper):
             return
 
         self.task.set_remote_base_path(self._get_remote_working_dir(job_wrapper))
@@ -122,6 +117,13 @@ class MarenostrumJobRunner(AsynchronousJobRunner):
         job_wrapper.set_external_id(job_id)
         ajs.job_id = job_id
         self.monitor_queue.put(ajs)
+
+    def _cleanup_job_deleted_before_running(self, job_wrapper):
+        if job_wrapper.get_state() in (model.Job.states.DELETED, model.Job.states.STOPPED):
+            log.debug("(%s) Job deleted/stopped by user before it entered the queue", job_wrapper.get_id_tag())
+            if job_wrapper.cleanup_job in ("always", "onsuccess"):
+                job_wrapper.cleanup()
+            return True;
 
     def check_watched_item(self, job_state):
         if self.is_key_missing:
@@ -179,6 +181,8 @@ class MarenostrumJobRunner(AsynchronousJobRunner):
 
     def stop_job(self, job_wrapper):
         """Attempts to delete a job from the DRM queue"""
+        if not self.task:
+            self._task_setup(job_wrapper)
         self.task.cancel()
         log.info("Job being stopped in Marenostrum")
 
@@ -298,20 +302,15 @@ class MarenostrumJobRunner(AsynchronousJobRunner):
             f.write("Copy the following key to the authorized_keys file in your Marenostrum account:\n\n ")
             f.write(public_key)
 
-    def _send_conda_envs(self, script):
+    def _send_conda_envs(self, job_wrapper, script):
         conda_envs = [x for x in re.split("'| |\n", script) if "_conda/envs/" in x]
-        for conda_env in conda_envs:
+        for conda_env in self._get_path_from_script(job_wrapper, script, "_conda/envs/"):
             self._send_conda_env(conda_env, self.conda_MN4 + "/" + os.path.basename(conda_env))
 
 
     def _send_conda_env(self, conda_env_path, remote_env_path):
         if self._get_local_conda_list_checksum(conda_env_path) != self._get_remote_conda_list_checksum(remote_env_path):
-
-
-        #if not os.path.isfile(conda_env_path + ".tar.gz"):
             conda_pack.CondaEnv.from_prefix(conda_env_path).pack(output=conda_env_path + ".tar.gz", force=True, dest_prefix=remote_env_path, verbose=True)
-
-        #if self.local_checksum(conda_env_path + ".tar.gz") != self.remote_checksum(remote_env_path + ".tar.gz"):
             self.task.set_local_file(local_data_filepath=conda_env_path + ".tar.gz")
             self.task.send_input_data(self.conda_MN4, overwrite=True)
             self.sss.run_command("rm -rf " + remote_env_path)
@@ -319,7 +318,7 @@ class MarenostrumJobRunner(AsynchronousJobRunner):
             self.sss.run_command("tar --skip-old-files -z -x  -v -f " + remote_env_path + ".tar.gz" +
                                               " -C " + remote_env_path)
     def _send_mutable_data_to_MN4(self, job_wrapper):
-        mutable_data_paths = self._get_path_from_script(job_wrapper, "mutable_data/shed_tools/")
+        mutable_data_paths = self._get_path_from_script(job_wrapper, self._get_raw_script(job_wrapper), "mutable_data/shed_tools/")
         for path in mutable_data_paths:
             remote_path = re.sub(os.path.dirname(self.config.get('tool_data_path')), self.mutable_data_path, path)
             self.sss.run_command("mkdir -p " + os.path.dirname(remote_path))
@@ -327,7 +326,7 @@ class MarenostrumJobRunner(AsynchronousJobRunner):
             self.task.send_input_data(os.path.dirname(remote_path), overwrite=False)
 
     def _send_datatypes_scripts_to_MN4(self, job_wrapper):
-        datatypes_paths = self._get_path_from_script(job_wrapper, "galaxy/datatypes/")
+        datatypes_paths = self._get_path_from_script(job_wrapper, self._get_raw_script(job_wrapper), "galaxy/datatypes/")
         for path in datatypes_paths:
             remote_path = self.datatypes_MN4 + '/' + re.split("/datatypes/", path)[1]
             self.sss.run_command("mkdir -p " + os.path.dirname(remote_path))
@@ -347,8 +346,8 @@ class MarenostrumJobRunner(AsynchronousJobRunner):
         self.task.ssh_session.run_sftp('get', remote_error, error_file)
         self.task.ssh_session.run_sftp('get', remote_exit_code, exit_code_file)
 
-    def _get_path_from_script(self, job_wrapper, pattern):
-        paths = [x for x in re.split("'| |\n", self._get_raw_script(job_wrapper)) if pattern in x]
+    def _get_path_from_script(self, job_wrapper, script, pattern):
+        paths = [x for x in re.split("'| |\n", script) if pattern in x]
         return paths
 
     def local_checksum(self, path):
@@ -367,22 +366,25 @@ class MarenostrumJobRunner(AsynchronousJobRunner):
             print("No remote file")
         return md5sum
 
+
+
+
     def _send_tool_script_to_MN4(self, job_wrapper):
         prepared_script = self._prepare_script(job_wrapper, self._get_raw_script(job_wrapper))
         prepared_script = "source " + self.conda_MN4 + "/etc/profile.d/conda.sh\n" + prepared_script
-        with open(job_wrapper.working_directory + "/tool_script.sh.prepared", "w") as f:
+        prepared_script_path = job_wrapper.working_directory + "/tool_script.sh.prepared"
+        with open(prepared_script_path, "w") as f:
             f.write(prepared_script)
-        with  open(job_wrapper.working_directory + "/tool_script.sh.prepared","r") as f:
-            print("---------------PREPARED_SCRIPT-----------------------")
-            print(f.read())
-            print("REMOTE WORKING DIR")
-            print(self._get_remote_working_dir(job_wrapper) + "/tool_script.sh.prepared")
-            print("---------------PREPARED_SCRIPT-----------------------")
 
-        self.task.set_local_file(local_data_filepath=job_wrapper.working_directory + "/tool_script.sh.prepared")
+        prepared_md5 = self.local_checksum(prepared_script_path)
+        print("[" + prepared_md5 + "] " + "PREPARED TOOL SCRIPT")
+        print("[" + prepared_md5 + "] " + prepared_script_path) 
+        print("[" + prepared_md5 + "] " + "PREPARED TOOL SCRIPT")
+        self.task.set_local_file(local_data_filepath=prepared_script_path)
         self.task.send_input_data(self._get_remote_working_dir(job_wrapper))
         remote_file = self._get_remote_working_dir(job_wrapper) + "/tool_script.sh.prepared"
-        print(self.sss.run_command("mv " + remote_file + " " + splitext(remote_file)[0]))
+
+        self.sss.run_command("mv " + remote_file + " " + splitext(remote_file)[0])
 
     def _send_inputs_to_MN4(self, job_wrapper):
         for path in job_wrapper.get_input_paths():
@@ -411,7 +413,8 @@ class MarenostrumJobRunner(AsynchronousJobRunner):
                 self._send_default_tool(tool_full_path, job_wrapper)
             except IndexError:
                 print("Builtin tool in script")
-        self._send_conda_envs(script)
+        self._send_conda_envs(job_wrapper, script)
+
     def _get_wrapper_script(self, job_wrapper):
         ajs = AsynchronousJobState(files_dir=job_wrapper.working_directory,
                                    job_wrapper=job_wrapper,
@@ -433,7 +436,8 @@ class MarenostrumJobRunner(AsynchronousJobRunner):
 
     def _get_remote_conda_list_checksum(self, remote_env_path):
         return self.sss.run_command(". " + self.conda_MN4 + "/etc/profile.d/conda.sh; " +
-                                                 "conda list -p " + remote_env_path + " | grep -v \"packages in environment\" | md5sum")[0].split()[0]
+                                    "conda list -p " + remote_env_path +
+                                    " | grep -v \"packages in environment\" | md5sum")[0].split()[0]
 
     def _get_local_conda_list_checksum(self, local_env_path):
         command = ". " + self.config.get('tool_dependency_dir') + "/_conda/etc/profile.d/conda.sh; conda list -p " + local_env_path + " | grep -v \"packages in environment\" | md5sum"
@@ -443,8 +447,8 @@ class MarenostrumJobRunner(AsynchronousJobRunner):
     def _get_outputs(self, job_wrapper):
         wrapper_script = self._get_wrapper_script(job_wrapper)
         tool_script = self._get_raw_script(job_wrapper)
-        outputs  = [x for x in re.split("'| |\n", wrapper_script) if "/files/" in x]
-        outputs += [x for x in re.split("'| |\n", tool_script) if "/files/" in x]
+        outputs  = self._get_path_from_script(job_wrapper, wrapper_script, "/files/")
+        outputs += self._get_path_from_script(job_wrapper, tool_script, "/files/")
         print("--------------------OUTPUTS-----------------")
         print(outputs)
         print("--------------------OUTPUTS-----------------")
@@ -462,15 +466,15 @@ class MarenostrumJobRunner(AsynchronousJobRunner):
         except IOError:
             print(remote_path, " not found")
 
-    def _compute_remote_output_paths_dirs(self, script):
-        output_paths = [x for x in re.split("'| |\n", script) if "/files/" in x]
-        for path in output_paths:
+    def _compute_remote_output_paths_dirs(self, job_wrapper, script):
+        #output_paths = [x for x in re.split("'| |\n", script) if "/files/" in x]
+        for path in self._get_path_from_script(job_wrapper, script, "/files/"):
             remote_path = os.path.dirname(re.sub(self.config.get('file_path'), self.file_path_MN4, path))
             self.sss.run_command("mkdir -p " + remote_path)
 
     def _get_datatypes_base_path(self, job_wrapper):
         path = ""
-        datatypes_paths = self._get_path_from_script(job_wrapper, "/galaxy/datatypes/")
+        datatypes_paths = self._get_path_from_script(job_wrapper, self._get_raw_script(job_wrapper), "/galaxy/datatypes/")
         if datatypes_paths:
             path = re.split("datatypes", datatypes_paths[0])[0] + "datatypes"
         return path

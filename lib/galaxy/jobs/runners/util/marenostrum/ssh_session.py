@@ -75,7 +75,7 @@ class SSHSession():
                 if os.path.isdir(input_file_path):
                     sftp.mkdir(output_file_path)
                 else:
-                    sftp.put(input_file_path, output_file_path)
+                    print(sftp.put(input_file_path, output_file_path))
                 return True
             elif oper == 'create':
                 with sftp.file(output_file_path, "w") as remote_fileh:

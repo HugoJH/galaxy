@@ -338,7 +338,7 @@ class Task():
         for file_path in self.task_data['local_data_bundle'].files:
             remote_file_path = self._remote_wdir() + '/' + os.path.basename(file_path)
             if overwrite or os.path.basename(file_path) not in remote_files:
-                print(self.ssh_session.run_sftp('put', file_path, remote_file_path))
+                self.ssh_session.run_sftp('put', file_path, remote_file_path)
                 print("sending_file: {} -> {}".format(file_path, remote_file_path))
         self.task_data['input_data_loaded'] = True
         self.modified = True
