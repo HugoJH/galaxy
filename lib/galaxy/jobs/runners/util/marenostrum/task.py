@@ -81,12 +81,12 @@ class Task():
             * userid (**str**): remote user id
             * look_for_keys (**bool**): Look for keys in user's .ssh directory
     """
-    def __init__(self, host=None, userid=None, look_for_keys=True):
+    def __init__(self, host=None, userid=None, look_for_keys=True, session=None):
         self.id = str(uuid.uuid4())
         #self.description = description
         self.ssh_data = SSHCredentials(host=host, userid=userid, look_for_keys=look_for_keys)
         self.task_data = {'id':self.id, 'modules':[]}
-        self.ssh_session = None
+        self.ssh_session = session
         self.host_config = None
         self.commands = {}
         self.modified = False
@@ -471,7 +471,7 @@ class Task():
 
         print("TASK: job_name = ", job_name)
 
-        print(self._prepare_queue_script(queue_settings, modules, conda_env=conda_env, set_debug=set_debug))
+        self._prepare_queue_script(queue_settings, modules, conda_env=conda_env, set_debug=set_debug)
         self.ssh_session.run_sftp(
             'create',
                 self._prepare_queue_script(queue_settings, modules, conda_env=conda_env, set_debug=set_debug),
@@ -683,6 +683,7 @@ class Task():
         return False
 
     def get_status(self, job_id):
+        self._open_ssh_session()
         stdout, stderr = self.ssh_session.run_command("sacct -j " + job_id + " | grep main | awk '{print $6}'")
         state = stdout
         return state

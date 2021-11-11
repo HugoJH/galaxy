@@ -26,8 +26,8 @@ SLURM_CODES = {
 }
 
 class Slurm(Task):
-    def __init__(self, host=None, userid=None, look_for_keys=True):
-        Task.__init__(self, host, userid, look_for_keys)
+    def __init__(self, host=None, userid=None, look_for_keys=True, session=None):
+        Task.__init__(self, host, userid, look_for_keys, session)
         self.commands = SLURM_COMMANDS
 
     def _get_queue_settings_string_array(self):

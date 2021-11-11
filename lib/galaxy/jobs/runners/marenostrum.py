@@ -62,7 +62,8 @@ class MarenostrumJobRunner(AsynchronousJobRunner):
     MN4_library_description = "Library to store MN4 keys"
     MN4_library_synopsis = "This library is intended to store Marenostrum 4 library keys"
     is_key_missing = False
-    task = None
+    sss = None
+    sss_dt = None
 
     def __init__(self, app, nworkers, **kwargs):
         """Start the job runner"""
@@ -73,7 +74,7 @@ class MarenostrumJobRunner(AsynchronousJobRunner):
         self.config = app.config
 
     def queue_job(self, job_wrapper):
-        self._task_setup(job_wrapper)
+        self._job_setup(job_wrapper)
         self.embed_metadata_in_job = asbool(job_wrapper.job_destination.params.get("embed_metadata_in_job", DEFAULT_EMBED_METADATA_IN_JOB))
         if not self.prepare_job(job_wrapper, include_metadata=self.embed_metadata_in_job):
             return
@@ -101,19 +102,19 @@ class MarenostrumJobRunner(AsynchronousJobRunner):
         if self._cleanup_job_deleted_before_running(job_wrapper):
             return
 
-        self.task.set_remote_base_path(self._get_remote_working_dir(job_wrapper))
         wrapper_script = self._get_wrapper_script(job_wrapper)
         prepared_wrapper_script = "cd working; export GALAXY_SLOTS=46; /bin/bash " + self._prepare_script(job_wrapper,wrapper_script)
 
-        #print(prepared_wrapper_script)
+        print(prepared_wrapper_script)
 
         with open(ajs.job_file, "w") as f:
             f.write(prepared_wrapper_script)
-        print("-------SUBMITTING TASK-------------------")
-        job_id = self.task.submit(queue_settings="debug",
-                                  job_name=self._job_name(job_wrapper),
-                                  local_run_script=ajs.job_file)
-        self._save_task(job_wrapper)
+        task = self._get_task(self.host_MN4, self.user_MN4, dt=False)
+        task.set_remote_base_path(self._get_remote_working_dir(job_wrapper))
+        job_id = task.submit(queue_settings="debug",
+                             job_name=self._job_name(job_wrapper),
+                             local_run_script=ajs.job_file)
+        task.save(self.task_cache + "/" + str(job_wrapper.job_id) + ".task")
         job_wrapper.set_external_id(job_id)
         ajs.job_id = job_id
         self.monitor_queue.put(ajs)
@@ -136,12 +137,13 @@ class MarenostrumJobRunner(AsynchronousJobRunner):
             return None
 
         job_id = job_state.job_id
-        job_status = self.task.get_status(job_id)
+        task = self._get_task(self.host_MN4, self.user_MN4)
+        job_status = task.get_status(job_id)
         state = model.Job.states.QUEUED
 
-        print("---------------JOB_STATUS------------------------")
-        print(job_status)
-        print("---------------JOB_STATUS------------------------")
+        #print("---------------JOB_STATUS------------------------")
+        #print(job_status)
+        #print("---------------JOB_STATUS------------------------")
 
         if "RUNNING" in job_status:
             job_state.running = True
@@ -181,14 +183,18 @@ class MarenostrumJobRunner(AsynchronousJobRunner):
 
     def stop_job(self, job_wrapper):
         """Attempts to delete a job from the DRM queue"""
-        if not self.task:
-            self._task_setup(job_wrapper)
-        self.task.cancel()
-        log.info("Job being stopped in Marenostrum")
+        self._job_setup(job_wrapper)
+        task = self._get_task(self.host_MN4, self.user_MN4, dt=False) 
+        job_id = str(job_wrapper.job_id)
+        try:
+            task.load_data_from_file(self.task_cache + "/" + job_id + ".task")
+            task.cancel()
+        except: 
+            print("Job " + job_id + " already finished or never scheduled")
 
     def recover(self, job, job_wrapper):
         """Recovers jobs stuck in the queued/running state when Galaxy started"""
-        self._task_setup(job_wrapper)
+        self._job_setup(job_wrapper)
         ajs = AsynchronousJobState(files_dir=job_wrapper.working_directory, job_wrapper=job_wrapper)
         ajs.job_id = str(job_wrapper.job_id)
         ajs.job_destination = job_wrapper.job_destination
@@ -202,10 +208,14 @@ class MarenostrumJobRunner(AsynchronousJobRunner):
             ajs.running = False
         self.monitor_queue.put(ajs)
 
-    def _task_setup(self, job_wrapper):
+    def _job_setup(self, job_wrapper):
         self._prepare_preferences(job_wrapper)
-        self._prepare_keys(job_wrapper.app.user_manager.by_id(job_wrapper.user_id).username, self.host_MN4, self.user_MN4)
-        self._prepare_task(self.host_MN4, self.user_MN4, job_wrapper)
+        galaxy_username = job_wrapper.app.user_manager.by_id(job_wrapper.user_id).username
+        self.credentials = self._prepare_keys(galaxy_username, self.host_MN4, self.user_MN4)
+        self.credentials_dt = self._prepare_keys(galaxy_username, self.host_MN4_dt, self.user_MN4)
+        self.sss = ssh_session.SSHSession(self.credentials)
+        self.sss_dt = ssh_session.SSHSession(self.credentials_dt)
+        self.sss_dt.run_command("mkdir -p " + self._get_remote_working_dir(job_wrapper) + "/{working,outputs}")
 
     def _prepare_preferences(self, job_wrapper):
         log.info("Getting user preferences")
@@ -213,6 +223,7 @@ class MarenostrumJobRunner(AsynchronousJobRunner):
         self.user_MN4 = json.loads(preferences["extra_user_preferences"])["MN4_user|MN4_user"]
         self.conda_MN4 = json.loads(preferences["extra_user_preferences"])["MN4_conda|MN4_conda"]
         self.host_MN4 = json.loads(preferences["extra_user_preferences"])["MN4_host|MN4_host"]
+        self.host_MN4_dt = "dt01.bsc.es"
         self.jobs_MN4 = json.loads(preferences["extra_user_preferences"])["MN4_jobs|MN4_jobs"]
         self.file_path_MN4 = os.path.dirname(self.jobs_MN4) + "/files"
         self.datatypes_MN4 = os.path.dirname(self.jobs_MN4) + "/datatypes"
@@ -230,45 +241,43 @@ class MarenostrumJobRunner(AsynchronousJobRunner):
         self.public_path = os.path.join(ssh_folder, "MN4_public")
         self.private_path = os.path.join(ssh_folder, "MN4_private")
         try: #If keys exist, load them from file
-            self.credentials = ssh_credentials.SSHCredentials()
-            self.credentials.load_from_file(self.keys_path)
+            credentials = ssh_credentials.SSHCredentials()
+            credentials.load_from_file(self.keys_path)
         except: #Otherwise create them
-            self.credentials = ssh_credentials.SSHCredentials(host=host,
+            credentials = ssh_credentials.SSHCredentials(host=host,
                              userid=MN4_username,
                              generate_key=False)
 
-            self.credentials.generate_key(2048)
-            self.credentials.save(output_path=self.keys_path,
-                                  public_key_path=self.public_path,
-                                  private_key_path=self.private_path)
-        self._check_host_auth()
+            credentials.generate_key(2048)
+            credentials.save(output_path=self.keys_path,
+                             public_key_path=self.public_path,
+                             private_key_path=self.private_path)
+        self._check_host_auth(credentials)
+        return credentials
 
-    def _prepare_task(self, host, userid, job_wrapper):
-        self.task = slurm.Slurm(host, userid, False)
-        self.task.set_credentials(self.credentials)
-        self.sss = ssh_session.SSHSession(self.credentials)
-        #Send galaxy's working dir to Marenostrum designated folder
-        self.sss.run_command("mkdir -p " + self._get_remote_working_dir(job_wrapper) + "/{working,outputs}")
-#        self.task.set_local_data_bundle(local_data_path=job_wrapper.working_directory)
- #       self.task.send_input_data(self._get_remote_working_dir(job_wrapper))
+    def _get_task(self, host, userid, dt=True):
+        session = None
+        if dt:
+            session = self._get_dt_ssh_session()
+        else:
+            session = self._get_ssh_session()
 
-        self.task.load_host_config(host_config_path=os.path.join(self.config.config_dir,"BSC_MN4.json"))
+        task = slurm.Slurm(host, userid, False, session)
+        task.set_credentials(self.credentials)
+        task.load_host_config(host_config_path=os.path.join(self.config.config_dir,"BSC_MN4.json"))
+        return task
 
-    def _recover_task(self,host, userid, job_id):
-        self.task = slurm.Slurm(host, userid, False)
-        self.task.set_credentials(self.credentials)
+    def _recover_task(self, host, userid, job_id):
+        task = self._get_task(host, userid)
         try:
-            self.task.load_data_from_file(self.task_cache + "/" + job_id + ".task")
+            task.load_data_from_file(self.task_cache + "/" + job_id + ".task")
+            return task
         except Exception as e:
             print (e)
 
-    def _save_task(self, job_wrapper):
-        job_id = job_wrapper.job_id
-        self.task.save(self.task_cache + "/" + str(job_id) + ".task")
-
-    def _check_host_auth(self):
+    def _check_host_auth(self, credentials):
         try:
-            self.credentials.check_host_auth()
+            credentials.check_host_auth()
         except paramiko.ssh_exception.SSHException as e:
             log.info(str(e))
             log.info("Connection to Marenostrum failed.Please copy the public key in the authorized host file")
@@ -309,42 +318,36 @@ class MarenostrumJobRunner(AsynchronousJobRunner):
 
 
     def _send_conda_env(self, conda_env_path, remote_env_path):
+
         if self._get_local_conda_list_checksum(conda_env_path) != self._get_remote_conda_list_checksum(remote_env_path):
+            
             conda_pack.CondaEnv.from_prefix(conda_env_path).pack(output=conda_env_path + ".tar.gz", force=True, dest_prefix=remote_env_path, verbose=True)
-            self.task.set_local_file(local_data_filepath=conda_env_path + ".tar.gz")
-            self.task.send_input_data(self.conda_MN4, overwrite=True)
-            self.sss.run_command("rm -rf " + remote_env_path)
-            self.sss.run_command("mkdir -p " + remote_env_path)
-            self.sss.run_command("tar --skip-old-files -z -x  -v -f " + remote_env_path + ".tar.gz" +
-                                              " -C " + remote_env_path)
+            self._send_file_to_MN4(conda_env_path + ".tar.gz", self.conda_MN4)
+            self.sss_dt.run_command("rm -rf " + remote_env_path)
+            self.sss_dt.run_command("mkdir -p " + remote_env_path)
+            self.sss_dt.run_command("tar --skip-old-files -z -x  -v -f " + remote_env_path + ".tar.gz" +
+                                    " -C " + remote_env_path)
+
     def _send_mutable_data_to_MN4(self, job_wrapper):
         mutable_data_paths = self._get_path_from_script(job_wrapper, self._get_raw_script(job_wrapper), "mutable_data/shed_tools/")
-        for path in mutable_data_paths:
-            remote_path = re.sub(os.path.dirname(self.config.get('tool_data_path')), self.mutable_data_path, path)
-            self.sss.run_command("mkdir -p " + os.path.dirname(remote_path))
-            self.task.set_local_file(local_data_filepath=path)
-            self.task.send_input_data(os.path.dirname(remote_path), overwrite=False)
+        for local_path in mutable_data_paths:
+            remote_path = os.path.dirname(re.sub(os.path.dirname(self.config.get('tool_data_path')), self.mutable_data_path, local_path))
+            self._send_file_to_MN4(local_path, remote_path)
 
     def _send_datatypes_scripts_to_MN4(self, job_wrapper):
         datatypes_paths = self._get_path_from_script(job_wrapper, self._get_raw_script(job_wrapper), "galaxy/datatypes/")
         for path in datatypes_paths:
             remote_path = self.datatypes_MN4 + '/' + re.split("/datatypes/", path)[1]
-            self.sss.run_command("mkdir -p " + os.path.dirname(remote_path))
-            self.task.set_local_file(local_data_filepath=path)
-            self.task.send_input_data(os.path.dirname(remote_path), overwrite=False)
-
+            self._send_file_to_MN4(path, os.path.dirname(remote_path))
 
     def create_log_files(self, output_file, exit_code_file, error_file, job_wrapper):
         remote_base_path = self._get_remote_working_dir(job_wrapper) + "/outputs"
         remote_output = remote_base_path + "/tool_stdout"
         remote_error = remote_base_path + "/tool_stderr"
         remote_exit_code = self._get_remote_working_dir(job_wrapper) + '/' + os.path.basename(exit_code_file)
-        print("--------------REMOTE EXIT CODE---------------")
-        print(remote_exit_code)
-        print("--------------REMOTE EXIT CODE---------------")
-        self.task.ssh_session.run_sftp('get', remote_output, output_file)
-        self.task.ssh_session.run_sftp('get', remote_error, error_file)
-        self.task.ssh_session.run_sftp('get', remote_exit_code, exit_code_file)
+        self.sss_dt.run_sftp('get', remote_output, output_file)
+        self.sss_dt.run_sftp('get', remote_error, error_file)
+        self.sss_dt.run_sftp('get', remote_exit_code, exit_code_file)
 
     def _get_path_from_script(self, job_wrapper, script, pattern):
         paths = [x for x in re.split("'| |\n", script) if pattern in x]
@@ -360,50 +363,40 @@ class MarenostrumJobRunner(AsynchronousJobRunner):
     def remote_checksum(self, path):
         md5sum = ""
         try:
-            command_output = self.task.sss.run_command("md5sum " + path)[0]
+            command_output = self.sss.run_command("md5sum " + path)[0]
             md5sum = command_output.split()[0]
         except:
             print("No remote file")
         return md5sum
 
-
-
-
     def _send_tool_script_to_MN4(self, job_wrapper):
         prepared_script = self._prepare_script(job_wrapper, self._get_raw_script(job_wrapper))
         prepared_script = "source " + self.conda_MN4 + "/etc/profile.d/conda.sh\n" + prepared_script
         prepared_script_path = job_wrapper.working_directory + "/tool_script.sh.prepared"
+
         with open(prepared_script_path, "w") as f:
             f.write(prepared_script)
+        remote_path = self._get_remote_working_dir(job_wrapper)
+        remote_file = remote_path + "/tool_script.sh.prepared"
 
-        prepared_md5 = self.local_checksum(prepared_script_path)
-        print("[" + prepared_md5 + "] " + "PREPARED TOOL SCRIPT")
-        print("[" + prepared_md5 + "] " + prepared_script_path) 
-        print("[" + prepared_md5 + "] " + "PREPARED TOOL SCRIPT")
-        self.task.set_local_file(local_data_filepath=prepared_script_path)
-        self.task.send_input_data(self._get_remote_working_dir(job_wrapper))
-        remote_file = self._get_remote_working_dir(job_wrapper) + "/tool_script.sh.prepared"
-
+        self._send_file_to_MN4(prepared_script_path, remote_path)
         self.sss.run_command("mv " + remote_file + " " + splitext(remote_file)[0])
 
     def _send_inputs_to_MN4(self, job_wrapper):
         for path in job_wrapper.get_input_paths():
-            input_path = path.real_path
-            basepath = re.sub(self.config.get('file_path'), "", input_path)
-            self.sss.run_command("mkdir -p " + self.file_path_MN4 + os.path.dirname(basepath))
-            self.task.set_local_file(local_data_filepath=input_path)
-            self.task.send_input_data(self.file_path_MN4 + "/" + os.path.dirname(basepath))
+            basepath = re.sub(self.config.get('file_path'), "", path.real_path)
+            remote_path = self.file_path_MN4 + "/" + os.path.dirname(basepath)
+            self._send_file_to_MN4(path.real_path, remote_path)
 
     def _send_metadata_files_to_MN4(self, job_wrapper):
-        metadata_paths = [x for x in re.split("'| |\n", self._get_raw_script(job_wrapper)) if "_metadata_files" in x]
+        metadata_paths = self._get_path_from_script(job_wrapper,self._get_raw_script(job_wrapper), "_metadata_files")
         for path in metadata_paths:
-            remote_path = re.sub(self.config.get('file_path') + "/_metadata_files", self.metadata_files_path, path)
-            self.task.set_local_file(local_data_filepath=path)
-            self.task.send_input_data(os.path.dirname(remote_path))
+            remote_path = os.path.dirname(re.sub(self.config.get('file_path') + "/_metadata_files", self.metadata_files_path, path))
+            self._send_file_to_MN4(path, remote_path)
 
     def _send_default_tool(self, tool_path, job_wrapper):
-        self.task.set_local_file(local_data_filepath=tool_path)
-        self.task.send_input_data(remote_base_path=self.tool_path + "/" + os.path.basename(job_wrapper.tool.tool_dir))
+        remote_path=self.tool_path + "/" + os.path.basename(job_wrapper.tool.tool_dir)
+        self._send_file_to_MN4(tool_path, remote_path)
 
     def _send_tools_to_MN4(self, job_wrapper, script):
         # ENVIAR ENTORNO CONDA A MN4
@@ -444,6 +437,12 @@ class MarenostrumJobRunner(AsynchronousJobRunner):
         result = subprocess.run(command, shell=True, stderr=subprocess.PIPE, stdout=subprocess.PIPE, executable="/bin/bash")
         return result.stdout.split()[0].decode('utf-8')
 
+    def _get_dt_ssh_session(self):
+        return ssh_session.SSHSession(self.credentials_dt)
+
+    def _get_ssh_session(self):
+        return ssh_session.SSHSession(self.credentials)
+        
     def _get_outputs(self, job_wrapper):
         wrapper_script = self._get_wrapper_script(job_wrapper)
         tool_script = self._get_raw_script(job_wrapper)
@@ -453,12 +452,11 @@ class MarenostrumJobRunner(AsynchronousJobRunner):
         print(outputs)
         print("--------------------OUTPUTS-----------------")
         for output_path in outputs:
-            remote_path = re.sub(self.config.get('file_path'), self.file_path_MN4, output_path)
-            remote_path = remote_path.strip('"')
-
-            print(f"getting output {remote_path} => {output_path}")
+            remote_path = re.sub(self.config.get('file_path'),
+                                 self.file_path_MN4, output_path).strip('"')
+        #    print(f"getting output {remote_path} => {output_path}")
             pathlib.Path(os.path.dirname(output_path)).mkdir(parents=True, exist_ok=True)
-            print(self.task.ssh_session.run_sftp('get', remote_path, output_path.strip('"')))
+            self.sss_dt.run_sftp('get', remote_path, output_path.strip('"'))
 
     def _remote_file_exists(self, remote_path):
         try:
@@ -467,7 +465,6 @@ class MarenostrumJobRunner(AsynchronousJobRunner):
             print(remote_path, " not found")
 
     def _compute_remote_output_paths_dirs(self, job_wrapper, script):
-        #output_paths = [x for x in re.split("'| |\n", script) if "/files/" in x]
         for path in self._get_path_from_script(job_wrapper, script, "/files/"):
             remote_path = os.path.dirname(re.sub(self.config.get('file_path'), self.file_path_MN4, path))
             self.sss.run_command("mkdir -p " + remote_path)
@@ -496,3 +493,10 @@ class MarenostrumJobRunner(AsynchronousJobRunner):
         if datatypes_path:
             script = re.sub(datatypes_path, self.datatypes_MN4, script)
         return script
+
+    def _send_file_to_MN4(self, local_path, remote_path):
+        self.sss_dt.run_command('mkdir -p ' + remote_path)
+        self.sss_dt.run_sftp('put', local_path, remote_path + "/" + os.path.basename(local_path))
+        #task = self._get_task(self.host_MN4, self.user_MN4)
+        #task.set_local_file(local_data_filepath=local_path)
+        #task.send_input_data(remote_base_path=remote_path)
